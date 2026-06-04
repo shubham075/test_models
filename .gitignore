@@ -1,0 +1,8 @@
+.generativeAI/
+generativeAI/
+
+# Environment variables
+.env
+
+
+

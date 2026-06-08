@@ -3,6 +3,6 @@ generativeAI/
 
 # Environment variables
 .env
-
+chroma-DB
 
 

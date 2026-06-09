@@ -1,0 +1,11 @@
+The Computer Science department offers courses in AI, Machine Learning, and Data Science.
+
+The Mechanical Engineering department specializes in robotics and manufacturing.
+
+Students must maintain a GPA of 2.5 or higher.
+
+Scholarships are available for students with GPA above 3.5.
+
+The university library remains open until 11 PM.
+
+International students must maintain full-time enrollment.

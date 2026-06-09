@@ -13,6 +13,7 @@ embedding_model = HuggingFaceEmbeddings(
 )
 
 # model_id = "microsoft/Phi-4-mini-instruct"
+# model_id = "hieupt/TinyLlama-1.1B-Chat-v1.0-Q4_K_M-GGUF"
 model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)

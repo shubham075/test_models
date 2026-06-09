@@ -1,0 +1,234 @@
+Ran command: `git branch`
+Ran command: `git push origin main`
+Ran command: `cls`
+Ran command: `cd .\RAG_PIPELINE\`
+Ran command: `cls`
+Viewed create_database.py:1-33
+Viewed ModelCALL.py:1-38
+Viewed main.py:1-65
+
+Here is a detailed analysis of your RAG pipeline code and suggestions for optimization. As requested, **no files have been modified**, so you can review and apply these changes manually.
+
+---
+
+### 1. Key Performance Bottlenecks & Design Issues
+
+#### ⚠️ Critical Issue 1: Re-Indexing the PDF on Every Execution (Duplicate Data)
+* **What's happening:** In [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py#L5), you import `vectorstore` directly from [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py). Because [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py) has no protection (e.g., `if __name__ == "__main__":`), importing it runs the entire script. It loads the PDF, runs the embedding model on all chunks, and appends them to Chroma.
+* **Why it's bad:** 
+  1. **Speed:** Every time you run [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py) to chat, you have to wait for the PDF to load, split, and embed all over again.
+  2. **DB Bloat & Redundant Results:** Chroma will append the same chunks *again and again* on every run. If you run your program 10 times, you will have 10 identical copies of each chunk in your database. This slows down retrieval and fills your context window with identical duplicate sentences.
+* **Solution:** Separate database creation/ingestion from the chat interface. Run [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py) only once to build the database, and in [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py), load the database directly from disk (`../chroma_DB_01`).
+
+#### ⚠️ Critical Issue 2: Double Embedding Model Loading (VRAM/RAM Waste)
+* **What's happening:** You instantiate `HuggingFaceEmbeddings` inside [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py#L10) and then instantiate it *again* inside [ModelCALL.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/ModelCALL.py#L11).
+* **Why it's bad:** Running [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py) executes both files, loading the embedding model into memory **twice**. This consumes double the memory/VRAM and increases startup latency.
+* **Solution:** Create a single helper function to retrieve the embedding model, or import the already created instance.
+
+#### ⚙️ Optimization 3: Model Inferences Tweaks
+* **Prompt Duplication:** By default, Hugging Face's pipeline for causal language models returns the input prompt plus the generated response. To ensure your chatbot only shows the AI's response, configure `return_full_text=False` in the pipeline parameters.
+* **Attention Mask & Padding Warnings:** TinyLlama will print warnings saying `pad_token_id` or attention masks are not set. Explicitly setting `pad_token_id=tokenizer.eos_token_id` and setting `tokenizer.pad_token = tokenizer.eos_token` clean up the console output.
+
+---
+
+### 2. Suggested Optimized Code
+
+Here are the optimized versions of your three files. You can replace the content of your files with these implementations to improve efficiency, speed, and memory usage.
+
+#### 1. [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py) (Ingestion Script)
+*This script is now wrapped in a main block. It can be run as a standalone script to initialize or update your database from the PDF, and won't trigger re-indexing when imported.*
+
+```python
+import os
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Singleton-style loader for embedding model to prevent duplicate instantiation
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+    return _embedding_model
+
+def build_vector_db(pdf_path: str, persist_dir: str):
+    """
+    Ingests PDF data, splits it, creates embeddings, and saves them to disk.
+    """
+    if not os.path.exists(pdf_path):
+        print(f"Error: PDF file not found at {pdf_path}")
+        return None
+
+    # Load embedding model
+    emb_model = get_embedding_model()
+
+    # Load dataset
+    print(f"Loading document: {pdf_path}...")
+    loader = PyPDFLoader(pdf_path)
+    docs = loader.load()
+
+    # Creating splitter and split docs into chunks
+    print("Splitting document into chunks...")
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100
+    )
+    chunks = splitter.split_documents(docs)
+
+    if chunks:
+        print(f"Storing {len(chunks)} chunks into vector DB at '{persist_dir}'...")
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=emb_model,
+            persist_directory=persist_dir
+        )
+        print("Chunks stored successfully!")
+        return vectorstore
+    else:
+        print("No chunks created.")
+        return None
+
+# Only runs if executed directly (e.g. python create_database.py)
+if __name__ == "__main__":
+    pdf_file = r"D:\MODELS\LocalModel001\RAG_PIPELINE\test.pdf"
+    db_directory = "../chroma_DB_01"
+    build_vector_db(pdf_file, db_directory)
+```
+
+#### 2. [ModelCALL.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/ModelCALL.py) (Model Loading)
+*Includes HuggingFace pipeline optimizations (`return_full_text=False`, setting padding token warnings) and exposes clean helper functions.*
+
+```python
+from dotenv import load_dotenv
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from langchain_huggingface import HuggingFacePipeline
+import torch
+from create_database import get_embedding_model  # Reuse embedding loader to save RAM
+
+load_dotenv()
+
+# Get the embedding model instance
+embedding_model = get_embedding_model()
+
+def get_llm():
+    model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    # Ensure pad token is set to avoid warnings during generation
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch.float16,  # Use float16 precision for speed and memory efficiency
+        device_map="auto"
+    )
+
+    pipe = pipeline(
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=250,
+        return_full_text=False,  # VERY IMPORTANT: Only returns generated response, not prompt
+        pad_token_id=tokenizer.eos_token_id
+    )
+
+    return HuggingFacePipeline(pipeline=pipe)
+
+# Export instances
+llm = get_llm()
+
+if __name__ == "__main__":
+    if llm:
+        print("LLM loaded successfully...")
+    else:
+        print("Calling Failed...")
+```
+
+#### 3. [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py) (Terminal Chat)
+*Directly connects to Chroma on disk. Unused modules like `torch` are cleaned up, and importing `create_database` now does NOT trigger document re-indexing.*
+
+```python
+import time
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.vectorstores import Chroma
+from ModelCALL import llm, embedding_model
+
+load_dotenv()
+
+# Directly load the existing vector store database from disk
+# This completely avoids running the PDF extraction and chunking code on every run!
+persist_directory = "../chroma_DB_01"
+vectorstore = Chroma(
+    persist_directory=persist_directory,
+    embedding_function=embedding_model
+)
+
+retriever_response = vectorstore.as_retriever(
+    search_type="mmr",
+    search_kwargs={
+        "k": 5,
+        "fetch_k": 10,
+        "lambda_mult": 0.5
+    }
+)
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", """You are a helpful AI assistant.
+Use only the provided context to answer the question.
+If the answer is not present in the context, say: 'I could not find the answer in the document.'
+"""),
+        ("human", """Context: {context}
+Question: {question}""")
+    ]
+)
+
+print("\nRAG system initialized successfully from disk!")
+print("Press '0' to exit.\n")
+
+while True:
+    query = input("You : ").strip()
+    if query == "0":
+        print("Goodbye!")
+        break
+    if not query:
+        continue
+
+    # Retrieve context
+    docs = retriever_response.invoke(query)
+    context = "\n\n".join([doc.page_content for doc in docs])
+
+    final_prompt = prompt.invoke(
+        {
+            "context": context,
+            "question": query
+        }
+    )
+
+    start_time = time.perf_counter()
+    response = llm.invoke(final_prompt)
+    end_time = time.perf_counter()
+
+    # Stripping whitespace from final output
+    print(f"\nAI : {response.strip()}")
+    print(f"\nResponse Time: {end_time - start_time:.2f} seconds\n")
+```
+
+---
+
+### Summary of Work
+
+1. **Analysis Conducted:** Checked imports and executions of [create_database.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/create_database.py), [ModelCALL.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/ModelCALL.py), and [main.py](file:///d:/MODELS/LocalModel001/RAG_PIPELINE/main.py).
+2. **Identified Bottlenecks:** Found side-effects on import (re-indexing files and double-loading models) and output duplication in text generation.
+3. **Drafted Optimizations:** Structured a clean singleton loader for the embedding model, added main-guard execution conditions, updated Chroma load methods, and pipeline params.
+4. **Adhered to Constraints:** No files on disk were modified.
